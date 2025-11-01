@@ -12,6 +12,7 @@
 #include <sstream>
 #include <fstream>
 #include <unistd.h>
+#include <sys/stat.h> // mkdir 추가
 #include "xdl.h"
 #include "log.h"
 #include "il2cpp-tabledefs.h"
@@ -24,18 +25,132 @@
 #undef DO_API
 
 static uint64_t il2cpp_base = 0;
+static uint64_t il2cpp_size = 0; // 덤프할 라이브러리 크기 저장을 위한 전역 변수
 
-void init_il2cpp_api(void *handle) {
-#define DO_API(r, n, p) {                      \
-    n = (r (*) p)xdl_sym(handle, #n, nullptr); \
-    if(!n) {                                   \
-        LOGW("api not found %s", #n);          \
-    }                                          \
+// ==============================================================================
+// === 추가된 헬퍼 함수 (메모리 덤프) ===
+// ==============================================================================
+void dump_memory_region(uint64_t start_addr, size_t size, const char *out_path) {
+    if (size == 0 || start_addr == 0) {
+        LOGE("주소(0x%" PRIx64 ") 또는 크기(%zu)가 유효하지 않아 메모리 덤프에 실패했습니다.", start_addr, size);
+        return;
+    }
+    LOGI("메모리 덤프 시도: Start=0x%" PRIx64 ", Size=%zu bytes", start_addr, size);
+
+    FILE *out_file = fopen(out_path, "wb");
+    if (!out_file) {
+        LOGE("출력 파일을 열 수 없습니다: %s", out_path);
+        return;
+    }
+
+    fwrite((void *) start_addr, 1, size, out_file);
+    fclose(out_file);
+    LOGI("메모리 덤프 완료: %s", out_path);
 }
 
-#include "il2cpp-api-functions.h"
+// ==============================================================================
+// === 추가된 헬퍼 함수 (메타데이터 복사) ===
+// ==============================================================================
+void copy_metadata(const char *data_dir, const char *out_path) {
+    LOGI("global-metadata.dat 복사 시도...");
+    
+    // Unity 버전에 따라 일반적인 두 경로를 시도합니다.
+    const char *paths[] = {
+            "/files/il2cpp/Metadata/global-metadata.dat", // Unity 2018.3+
+            "/assets/bin/Data/Managed/Metadata/global-metadata.dat" // 구형 Unity (APK 내 경로)
+    };
 
-#undef DO_API
+    std::string source_path;
+    std::ifstream src;
+
+    for (const char *path_suffix : paths) {
+        source_path = std::string(data_dir) + path_suffix;
+        src.open(source_path, std::ios::binary);
+        if (src.good()) {
+            LOGI("메타데이터 파일 찾음: %s", source_path.c_str());
+            break;
+        } else {
+            src.close();
+        }
+    }
+
+    if (!src.is_open()) {
+        LOGE("global-metadata.dat 파일을 찾을 수 없습니다. (경로: %s 및 기타 폴백)", source_path.c_str());
+        return;
+    }
+
+    std::ofstream dst(out_path, std::ios::binary);
+    if (!dst.is_open()) {
+        LOGE("출력 파일을 열 수 없습니다: %s", out_path);
+        src.close();
+        return;
+    }
+
+    dst << src.rdbuf();
+    dst.close();
+    src.close();
+    LOGI("메타데이터 복사 완료: %s", out_path);
+}
+
+// ==============================================================================
+// === 수정된 il2cpp_api_init 함수 ===
+// ==============================================================================
+void il2cpp_api_init(void *handle) {
+    LOGI("il2cpp_handle: %p", handle);
+    init_il2cpp_api(handle);
+    if (il2cpp_domain_get_assemblies) {
+        Dl_info dlInfo;
+        if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
+            il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
+            LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
+
+            // --- 추가된 로직: /proc/self/maps를 파싱하여 라이브러리 크기 찾기 ---
+            FILE *maps = fopen("/proc/self/maps", "r");
+            if (maps) {
+                char line[1024];
+                uint64_t start = 0, end = 0;
+                uint64_t lib_end = 0;
+                while (fgets(line, sizeof(line), maps)) {
+                    if (strstr(line, dlInfo.dli_fname)) { // 맵에서 라이브러리 이름 찾기
+                        if (sscanf(line, "%" PRIx64 "-%" PRIx64, &start, &end) == 2) {
+                            if (start == il2cpp_base) { // 시작 주소가 일치하는 항목
+                                lib_end = end;
+                                // 연속된 메모리 블록의 끝까지 읽기
+                                while (fgets(line, sizeof(line), maps)) {
+                                    if (strstr(line, dlInfo.dli_fname)) {
+                                        if (sscanf(line, "%" PRIx64 "-%" PRIx64, &start, &end) == 2) {
+                                            lib_end = end; // 마지막 주소 업데이트
+                                        }
+                                    } else {
+                                        break; // 연속 블록 끝
+                                    }
+                                }
+                                il2cpp_size = lib_end - il2cpp_base;
+                                LOGI("libil2cpp.so 메모리 영역 찾음: Size=%zu bytes", il2cpp_size);
+                                break;
+                            }
+                        }
+                    }
+                }
+                fclose(maps);
+            } else {
+                LOGW("/proc/self/maps 파일을 열 수 없어 라이브러리 크기를 찾지 못했습니다.");
+            }
+            // --- 추가된 로직 끝 ---
+
+        } else {
+            LOGE("dladdr failed for il2cpp_domain_get_assemblies");
+        }
+    } else {
+        LOGE("Failed to initialize il2cpp api.");
+        return;
+    }
+    while (!il2cpp_is_vm_thread(nullptr)) {
+        LOGI("Waiting for il2cpp_init...");
+        sleep(1);
+    }
+    auto domain = il2cpp_domain_get();
+    il2cpp_thread_attach(domain);
 }
 
 std::string get_method_modifier(uint32_t flags) {
@@ -322,29 +437,29 @@ std::string dump_type(const Il2CppType *type) {
     return outPut.str();
 }
 
-void il2cpp_api_init(void *handle) {
-    LOGI("il2cpp_handle: %p", handle);
-    init_il2cpp_api(handle);
-    if (il2cpp_domain_get_assemblies) {
-        Dl_info dlInfo;
-        if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
-            il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
-        }
-        LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
-    } else {
-        LOGE("Failed to initialize il2cpp api.");
-        return;
-    }
-    while (!il2cpp_is_vm_thread(nullptr)) {
-        LOGI("Waiting for il2cpp_init...");
-        sleep(1);
-    }
-    auto domain = il2cpp_domain_get();
-    il2cpp_thread_attach(domain);
-}
-
+// ==============================================================================
+// === 수정된 il2cpp_dump 함수 ===
+// ==============================================================================
 void il2cpp_dump(const char *outDir) {
     LOGI("dumping...");
+
+    // --- 추가된 덤프 로직 ---
+    std::string out_dir_files = std::string(outDir) + "/files";
+    mkdir(out_dir_files.c_str(), 0755); // /files 디렉토리 생성 확인
+
+    // 1. libil2cpp.so 덤프
+    std::string lib_out_path = out_dir_files + "/libil2cpp.so";
+    dump_memory_region(il2cpp_base, il2cpp_size, lib_out_path.c_str());
+
+    // 2. global-metadata.dat 복사
+    // (outDir은 /data/data/<pkg_name> 입니다)
+    std::string metadata_out_path = out_dir_files + "/global-metadata.dat";
+    copy_metadata(outDir, metadata_out_path.c_str());
+    // --- 추가된 덤프 로직 끝 ---
+
+
+    // --- 원본 dump.cs 생성 로직 ---
+    LOGI("dumping classes, methods, etc. to dump.cs");
     size_t size;
     auto domain = il2cpp_domain_get();
     auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
@@ -356,7 +471,7 @@ void il2cpp_dump(const char *outDir) {
     std::vector<std::string> outPuts;
     if (il2cpp_image_get_class) {
         LOGI("Version greater than 2018.3");
-        //使用il2cpp_image_get_class
+        //사용il2cpp_image_get_class
         for (int i = 0; i < size; ++i) {
             auto image = il2cpp_assembly_get_image(assemblies[i]);
             std::stringstream imageStr;
@@ -372,7 +487,7 @@ void il2cpp_dump(const char *outDir) {
         }
     } else {
         LOGI("Version less than 2018.3");
-        //使用反射
+        //사용반사
         auto corlib = il2cpp_get_corlib();
         auto assemblyClass = il2cpp_class_from_name(corlib, "System.Reflection", "Assembly");
         auto assemblyLoad = il2cpp_class_get_method_from_name(assemblyClass, "Load", 1);

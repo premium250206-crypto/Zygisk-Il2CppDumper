@@ -18,6 +18,11 @@
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
 
+// <<< 수정된 부분: 함수 프로토타입 추가
+// 이 함수가 파일 뒷부분에 정의되어 있다고 컴파일러에게 미리 알려줍니다.
+void init_il2cpp_api(void *handle);
+// <<< 수정 끝
+
 #define DO_API(r, n, p) r (*n) p
 
 #include "il2cpp-api-functions.h"
@@ -92,66 +97,7 @@ void copy_metadata(const char *data_dir, const char *out_path) {
     LOGI("메타데이터 복사 완료: %s", out_path);
 }
 
-// ==============================================================================
-// === 수정된 il2cpp_api_init 함수 ===
-// ==============================================================================
-void il2cpp_api_init(void *handle) {
-    LOGI("il2cpp_handle: %p", handle);
-    init_il2cpp_api(handle);
-    if (il2cpp_domain_get_assemblies) {
-        Dl_info dlInfo;
-        if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
-            il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
-            LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
-
-            // --- 추가된 로직: /proc/self/maps를 파싱하여 라이브러리 크기 찾기 ---
-            FILE *maps = fopen("/proc/self/maps", "r");
-            if (maps) {
-                char line[1024];
-                uint64_t start = 0, end = 0;
-                uint64_t lib_end = 0;
-                while (fgets(line, sizeof(line), maps)) {
-                    if (strstr(line, dlInfo.dli_fname)) { // 맵에서 라이브러리 이름 찾기
-                        if (sscanf(line, "%" PRIx64 "-%" PRIx64, &start, &end) == 2) {
-                            if (start == il2cpp_base) { // 시작 주소가 일치하는 항목
-                                lib_end = end;
-                                // 연속된 메모리 블록의 끝까지 읽기
-                                while (fgets(line, sizeof(line), maps)) {
-                                    if (strstr(line, dlInfo.dli_fname)) {
-                                        if (sscanf(line, "%" PRIx64 "-%" PRIx64, &start, &end) == 2) {
-                                            lib_end = end; // 마지막 주소 업데이트
-                                        }
-                                    } else {
-                                        break; // 연속 블록 끝
-                                    }
-                                }
-                                il2cpp_size = lib_end - il2cpp_base;
-                                LOGI("libil2cpp.so 메모리 영역 찾음: Size=%zu bytes", il2cpp_size);
-                                break;
-                            }
-                        }
-                    }
-                }
-                fclose(maps);
-            } else {
-                LOGW("/proc/self/maps 파일을 열 수 없어 라이브러리 크기를 찾지 못했습니다.");
-            }
-            // --- 추가된 로직 끝 ---
-
-        } else {
-            LOGE("dladdr failed for il2cpp_domain_get_assemblies");
-        }
-    } else {
-        LOGE("Failed to initialize il2cpp api.");
-        return;
-    }
-    while (!il2cpp_is_vm_thread(nullptr)) {
-        LOGI("Waiting for il2cpp_init...");
-        sleep(1);
-    }
-    auto domain = il2cpp_domain_get();
-    il2cpp_thread_attach(domain);
-}
+// (참고: 원본 init_il2cpp_api 함수 정의는 이 파일의 뒷부분으로 이동했습니다.)
 
 std::string get_method_modifier(uint32_t flags) {
     std::stringstream outPut;
@@ -435,6 +381,83 @@ std::string dump_type(const Il2CppType *type) {
     //TODO EventInfo
     outPut << "}\n";
     return outPut.str();
+}
+
+// ==============================================================================
+// === 원본 init_il2cpp_api 함수 정의 (이제 프로토타입이 위에 있습니다) ===
+// ==============================================================================
+void init_il2cpp_api(void *handle) {
+#define DO_API(r, n, p) {                      \
+    n = (r (*) p)xdl_sym(handle, #n, nullptr); \
+    if(!n) {                                   \
+        LOGW("api not found %s", #n);          \
+    }                                          \
+}
+
+#include "il2cpp-api-functions.h"
+
+#undef DO_API
+}
+
+// ==============================================================================
+// === 수정된 il2cpp_api_init 함수 ===
+// ==============================================================================
+void il2cpp_api_init(void *handle) {
+    LOGI("il2cpp_handle: %p", handle);
+    init_il2cpp_api(handle); // 이제 이 함수는 이 파일의 윗부분에 선언되었습니다.
+    if (il2cpp_domain_get_assemblies) {
+        Dl_info dlInfo;
+        if (dladdr((void *) il2cpp_domain_get_assemblies, &dlInfo)) {
+            il2cpp_base = reinterpret_cast<uint64_t>(dlInfo.dli_fbase);
+            LOGI("il2cpp_base: %" PRIx64"", il2cpp_base);
+
+            // --- 추가된 로직: /proc/self/maps를 파싱하여 라이브러리 크기 찾기 ---
+            FILE *maps = fopen("/proc/self/maps", "r");
+            if (maps) {
+                char line[1024];
+                uint64_t start = 0, end = 0;
+                uint64_t lib_end = 0;
+                while (fgets(line, sizeof(line), maps)) {
+                    if (strstr(line, dlInfo.dli_fname)) { // 맵에서 라이브러리 이름 찾기
+                        if (sscanf(line, "%" PRIx64 "-%" PRIx64, &start, &end) == 2) {
+                            if (start == il2cpp_base) { // 시작 주소가 일치하는 항목
+                                lib_end = end;
+                                // 연속된 메모리 블록의 끝까지 읽기
+                                while (fgets(line, sizeof(line), maps)) {
+                                    if (strstr(line, dlInfo.dli_fname)) {
+                                        if (sscanf(line, "%" PRIx64 "-%" PRIx64, &start, &end) == 2) {
+                                            lib_end = end; // 마지막 주소 업데이트
+                                        }
+                                    } else {
+                                        break; // 연속 블록 끝
+                                    }
+                                }
+                                il2cpp_size = lib_end - il2cpp_base;
+                                LOGI("libil2cpp.so 메모리 영역 찾음: Size=%zu bytes", il2cpp_size);
+                                break;
+                            }
+                        }
+                    }
+                }
+                fclose(maps);
+            } else {
+                LOGW("/proc/self/maps 파일을 열 수 없어 라이브러리 크기를 찾지 못했습니다.");
+            }
+            // --- 추가된 로직 끝 ---
+
+        } else {
+            LOGE("dladdr failed for il2cpp_domain_get_assemblies");
+        }
+    } else {
+        LOGE("Failed to initialize il2cpp api.");
+        return;
+    }
+    while (!il2cpp_is_vm_thread(nullptr)) {
+        LOGI("Waiting for il2cpp_init...");
+        sleep(1);
+    }
+    auto domain = il2cpp_domain_get();
+    il2cpp_thread_attach(domain);
 }
 
 // ==============================================================================

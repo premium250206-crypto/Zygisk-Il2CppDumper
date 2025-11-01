@@ -6,7 +6,7 @@
 #include <dlfcn.h>
 #include <cstdlib>
 #include <cstring>
-#include <cinttypes>
+#include <cinttypes> // <<< 수정: 아키텍처 호환용 헤더 추가
 #include <string>
 #include <vector>
 #include <sstream>
@@ -18,9 +18,8 @@
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
 
-// <<< 수정된 부분: 함수 프로토타입 추가 (중복 정의 오류 수정)
+// 함수 프로토타입 선언
 void init_il2cpp_api(void *handle);
-// <<< 수정 끝
 
 #define DO_API(r, n, p) r (*n) p
 
@@ -36,11 +35,12 @@ static uint64_t il2cpp_size = 0; // 덤프할 라이브러리 크기 저장을 �
 // ==============================================================================
 void dump_memory_region(uint64_t start_addr, size_t size, const char *out_path) {
     if (size == 0 || start_addr == 0) {
-        // 32비트/64비트 호환성을 위해 %llu (long long unsigned) 사용
-        LOGE("주소(0x%" PRIx64 ") 또는 크기(%llu)가 유효하지 않아 메모리 덤프에 실패했습니다.", start_addr, (unsigned long long)size);
+        // <<< 수정: %llu -> %zu (size_t) 및 PRIx64 (uint64_t)
+        LOGE("주소(0x%" PRIx64 ") 또는 크기(%zu)가 유효하지 않아 메모리 덤프에 실패했습니다.", start_addr, size);
         return;
     }
-    LOGI("메모리 덤프 시도: Start=0x%" PRIx64 ", Size=%llu bytes", start_addr, (unsigned long long)size);
+    LOGI("메모리 덤프 시도: Start=0x%" PRIx64 ", Size=%zu bytes", start_addr, size);
+    // <<< 수정 끝
 
     FILE *out_file = fopen(out_path, "wb");
     if (!out_file) {
@@ -98,7 +98,7 @@ void copy_metadata(const char *data_dir, const char *out_path) {
 }
 
 // ==============================================================================
-// === 수정된 il2cpp_api_init 함수 (정의가 아닌 선언) ===
+// === 수정된 il2cpp_api_init 함수 (선언부) ===
 // ==============================================================================
 void il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
@@ -131,8 +131,8 @@ void il2cpp_api_init(void *handle) {
                                     }
                                 }
                                 il2cpp_size = lib_end - il2cpp_base;
-                                // <<< 수정된 부분: %zu -> %llu
-                                LOGI("libil2cpp.so 메모리 영역 찾음: Size=%llu bytes", il2cpp_size);
+                                // <<< 수정: %llu -> PRIu64
+                                LOGI("libil2cpp.so 메모리 영역 찾음: Size=%" PRIu64 " bytes", il2cpp_size);
                                 // <<< 수정 끝
                                 break;
                             }
@@ -445,8 +445,7 @@ std::string dump_type(const Il2CppType *type) {
 }
 
 // ==============================================================================
-// === 원본 init_il2cpp_api 함수 정의 ===
-// === (il2cpp_api_init 함수가 호출하는 실제 함수) ===
+// === 원본 init_il2cpp_api 함수 정의 (실제 내용) ===
 // ==============================================================================
 void init_il2cpp_api(void *handle) {
 #define DO_API(r, n, p) {                      \
